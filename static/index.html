@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Iniciar Llamada y Ver Transcripción</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 20px;
+      background-color: #f4f4f4;
+      border-radius: 8px;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    input, button {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    #status {
+      margin-top: 16px;
+      padding: 10px;
+      background-color: #eef;
+      border-radius: 4px;
+      min-height: 50px;
+    }
+    #transcription {
+      white-space: pre-wrap;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 16px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Iniciar Llamada & Ver Transcripción</h1>
+
+  <label for="phone">Número de teléfono (E.164):</label>
+  <input type="text" id="phone" placeholder="+573221234567" />
+
+  <button id="callButton">Iniciar Llamada</button>
+
+  <div id="status"></div>
+  <div id="transcription"></div>
+
+  <script>
+    const callButton = document.getElementById('callButton');
+    const phoneInput = document.getElementById('phone');
+    const statusDiv = document.getElementById('status');
+    const transcriptionDiv = document.getElementById('transcription');
+
+    let pollInterval = null;
+
+    callButton.addEventListener('click', () => {
+      const toNumber = phoneInput.value.trim();
+      transcriptionDiv.textContent = '';
+      statusDiv.textContent = 'Enviando solicitud de llamada...';
+
+      // Validar formato E.164 básico
+      if (!toNumber.startsWith('+') || toNumber.length < 10) {
+        statusDiv.textContent = 'Número no válido. Debe usar formato E.164, p.ej. +573221234567';
+        return;
+      }
+
+      // Llamar al endpoint /make-call
+      fetch('/make-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_number: toNumber })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          statusDiv.textContent = 'Error al iniciar llamada: ' + data.error;
+          return;
+        }
+        const callSid = data.call_sid;
+        statusDiv.textContent = 'Llamada iniciada. CallSid: ' + callSid + '. Esperando transcripción...';
+        // Comenzar polling de la transcripción
+        pollInterval = setInterval(() => {
+          fetch(`/get-transcription/${callSid}`)
+            .then(res => res.json())
+            .then(payload => {
+              if (payload.error) {
+                // Aún no existe transcripción en disco; puede estar en memoria
+                const partial = (payload.transcription || []).map(e => `${e.role}: ${e.content}`).join('\n');
+                transcriptionDiv.textContent = partial || 'Transcripción en progreso…';
+                return;
+              }
+              if (payload.is_complete) {
+                clearInterval(pollInterval);
+                statusDiv.textContent = 'Llamada finalizada. Transcripción completa:';
+                let allEntries = [];
+                if (payload.transcription.transcription instanceof Array) {
+                  // Estructura JSON guardada en disco
+                  allEntries = payload.transcription.transcription;
+                } else if (Array.isArray(payload.transcription)) {
+                  // Transcripción parcial en memoria
+                  allEntries = payload.transcription;
+                }
+                const text = allEntries.map(e => `${e.role}: ${e.content}`).join('\n\n');
+                transcriptionDiv.textContent = text || '[Sin contenido]';
+              } else {
+                // Transcripción parcial en memoria
+                const partial = (payload.transcription || []).map(e => `${e.role}: ${e.content}`).join('\n');
+                transcriptionDiv.textContent = partial || 'Transcripción en progreso…';
+              }
+            })
+            .catch(err => {
+              statusDiv.textContent = 'Error obteniendo transcripción: ' + err;
+              clearInterval(pollInterval);
+            });
+        }, 4000); // Poll cada 4 segundos
+      })
+      .catch(err => {
+        statusDiv.textContent = 'Error en fetch /make-call: ' + err;
+      });
+    });
+  </script>
+</body>
+</html>
