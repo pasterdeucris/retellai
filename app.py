@@ -609,7 +609,7 @@ async def email_to_address(call_event: CallEvent, email: EmailStr):
     try:
         # FILTRO: Solo procesar call_ended
         if call_event.event != "call_ended":
-            return Response(status_code=204)  # No Content - evento ignorado
+            return Response(status_code=200)  # No Content - evento ignorado
             
         call = call_event.call
         
