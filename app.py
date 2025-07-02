@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException , Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr
 from typing import List, Dict, Any, Optional
@@ -12,8 +12,80 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+import time
+from fastapi import Request
+
+# Configuración de logging
+def setup_logging():
+    """Configura el sistema de logging"""
+    # Crear directorio de logs si no existe
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Configurar el logger principal
+    logger = logging.getLogger("call_analysis")
+    logger.setLevel(logging.INFO)
+    
+    # Evitar duplicar handlers si ya existen
+    if logger.handlers:
+        return logger
+    
+    # Formato de logs
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Handler para archivo (rotativo)
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "call_analysis.log"),
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    
+    # Handler para consola
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    
+    # Agregar handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Inicializar logger
+logger = setup_logging()
 
 app = FastAPI(title="Call Analysis API", version="1.0.0")
+
+# Middleware para logging de requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    # Log de request entrante
+    logger.info(f"🌐 {request.method} {request.url.path} | Client: {request.client.host if request.client else 'Unknown'}")
+    
+    # Procesar request
+    response = await call_next(request)
+    
+    # Calcular tiempo de procesamiento
+    process_time = time.time() - start_time
+    
+    # Log de respuesta
+    logger.info(f"✅ {request.method} {request.url.path} | Status: {response.status_code} | Time: {process_time:.3f}s")
+    
+    return response
+
+# Log de inicio del sistema
+logger.info("🚀 Call Analysis API iniciada - Version 1.0.0")
 
 # Modelos Pydantic para validar el JSON
 class Word(BaseModel):
@@ -39,6 +111,8 @@ class Call(BaseModel):
     call_type: str
     agent_id: str
     agent_version: int
+    agent_name: Optional[str] = None  # Nuevo campo agregado
+    collected_dynamic_variables: Optional[Dict[str, Any]] = None  # Nuevo campo agregado
     call_status: str
     start_timestamp: int
     end_timestamp: int
@@ -66,31 +140,37 @@ class EmailRequest(BaseModel):
     subject: Optional[str] = "Call Analysis Report"
     message: Optional[str] = "Please find attached the call analysis report."
 
-class CallEventWithEmail(BaseModel):
-    event: str
-    call: Call
-    email_config: EmailRequest
-
 # Configuración de email (puedes usar variables de entorno)
 EMAIL_CONFIG = {
     "smtp_server": "smtp.gmail.com",  
     "smtp_port": 587,
     "email_user": "aensilesqla@gmail.com", 
     "email_password": "qpjntndxixwxdahn",
-    "default_recipient": "aensilesqla@gmail.com",  # Email por defecto NUEVO
+    "default_recipient": "cristian.mancilla96@gmail.com",  # Email por defecto
 }
-
 
 def send_email_with_pdf(pdf_path: str, recipient_email: str, subject: str, message: str, call_id: str):
     """
     Envía un email con el PDF adjunto
     """
+    logger.info(f"📧 Iniciando envío de email | Call ID: {call_id} | Destinatario: {recipient_email}")
+    
     try:
+        # Verificar que el archivo PDF existe
+        if not os.path.exists(pdf_path):
+            logger.error(f"❌ PDF no encontrado: {pdf_path}")
+            return False
+        
+        pdf_size = os.path.getsize(pdf_path)
+        logger.info(f"📎 PDF encontrado | Tamaño: {pdf_size} bytes | Ruta: {pdf_path}")
+        
         # Crear mensaje
         msg = MIMEMultipart()
         msg['From'] = EMAIL_CONFIG["email_user"]
         msg['To'] = recipient_email
         msg['Subject'] = subject
+        
+        logger.info(f"✉️ Construyendo mensaje | De: {EMAIL_CONFIG['email_user']} | Para: {recipient_email}")
         
         # Cuerpo del mensaje HTML
         html_body = f"""
@@ -135,6 +215,7 @@ def send_email_with_pdf(pdf_path: str, recipient_email: str, subject: str, messa
         """
         
         msg.attach(MIMEText(html_body, 'html'))
+        logger.info("📝 Cuerpo HTML del email construido")
         
         # Adjuntar PDF
         with open(pdf_path, "rb") as attachment:
@@ -150,85 +231,59 @@ def send_email_with_pdf(pdf_path: str, recipient_email: str, subject: str, messa
         )
         
         msg.attach(part)
+        logger.info(f"📎 PDF adjuntado como: {pdf_filename}")
         
-        # Enviar email
+        # Conectar al servidor SMTP
+        logger.info(f"🔗 Conectando a servidor SMTP: {EMAIL_CONFIG['smtp_server']}:{EMAIL_CONFIG['smtp_port']}")
         server = smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"])
         server.starttls()
-        server.login(EMAIL_CONFIG["email_user"], EMAIL_CONFIG["email_password"])
+        logger.info("🔐 Conexión TLS establecida")
         
+        server.login(EMAIL_CONFIG["email_user"], EMAIL_CONFIG["email_password"])
+        logger.info("✅ Login SMTP exitoso")
+        
+        # Enviar email
         text = msg.as_string()
         server.sendmail(EMAIL_CONFIG["email_user"], recipient_email, text)
         server.quit()
         
+        logger.info(f"✅ Email enviado exitosamente | Call ID: {call_id} | Destinatario: {recipient_email}")
         return True
         
-    except Exception as e:
-        print(f"Error enviando email: {str(e)}")
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"❌ Error de autenticación SMTP | Call ID: {call_id} | Error: {str(e)}")
         return False
-
-app = FastAPI(title="Call Analysis API", version="1.0.0")
-
-# Modelos Pydantic para validar el JSON
-class Word(BaseModel):
-    word: str
-    start: float
-    end: float
-
-class TranscriptItem(BaseModel):
-    role: str
-    content: str
-    words: List[Word]
-    metadata: Optional[Dict[str, Any]] = None
-
-class CallAnalysis(BaseModel):
-    call_summary: str
-    in_voicemail: bool
-    user_sentiment: str
-    call_successful: bool
-    custom_analysis_data: Dict[str, Any]
-
-class Call(BaseModel):
-    call_id: str
-    call_type: str
-    agent_id: str
-    agent_version: int
-    call_status: str
-    start_timestamp: int
-    end_timestamp: int
-    duration_ms: int
-    transcript: str
-    transcript_object: List[TranscriptItem]
-    transcript_with_tool_calls: List[TranscriptItem]
-    recording_url: str
-    public_log_url: str
-    disconnection_reason: str
-    latency: Dict[str, Any]
-    call_cost: Dict[str, Any]
-    call_analysis: CallAnalysis
-    opt_out_sensitive_data_storage: bool
-    opt_in_signed_url: bool
-    llm_token_usage: Dict[str, Any]
-    access_token: str
-
-class CallEvent(BaseModel):
-    event: str
-    call: Call
+    except smtplib.SMTPConnectError as e:
+        logger.error(f"❌ Error de conexión SMTP | Call ID: {call_id} | Error: {str(e)}")
+        return False
+    except FileNotFoundError as e:
+        logger.error(f"❌ Archivo PDF no encontrado | Call ID: {call_id} | Error: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error general enviando email | Call ID: {call_id} | Error: {str(e)}")
+        return False
 
 # Función para concatenar la conversación
 def concatenate_conversation(transcript_object: List[TranscriptItem]) -> str:
     """
     Concatena la conversación en un formato legible
     """
+    logger.info(f"🔄 Concatenando conversación | Total elementos: {len(transcript_object)}")
+    
     conversation = []
     
-    for item in transcript_object:
+    for i, item in enumerate(transcript_object):
         role = item.role.capitalize()
         content = item.content
         
         # Formato: "Rol: Contenido"
         conversation.append(f"{role}: {content}")
+        logger.debug(f"Elemento {i+1}: {role} - {len(content)} caracteres")
     
-    return "\n".join(conversation)
+    result = "\n".join(conversation)
+    logger.info(f"✅ Conversación concatenada | Total líneas: {len(conversation)} | Caracteres: {len(result)}")
+    
+    return result
 
 class ModernPDFReport(FPDF):
     def __init__(self):
@@ -429,131 +484,167 @@ def generate_pdf_report(call: Call, concatenated_conversation: str, conversation
     """
     Genera un PDF moderno con métricas visuales
     """
-    pdf = ModernPDFReport()
-    pdf.add_page()
+    logger.info(f"📄 Iniciando generación de PDF | Call ID: {call.call_id} | Output: {output_path}")
     
-    # Calcular métricas para el dashboard
-    success_score = 85 if call.call_analysis.call_successful else 45
-    engagement_score = max(20, 100 - (conversation_summary['inaudible_speeches'] * 30))
-    
-    # Mapear sentiment a score
-    sentiment_map = {
-        "Positive": 90,
-        "Neutral": 70,
-        "Negative": 40
-    }
-    sentiment_score = sentiment_map.get(call.call_analysis.user_sentiment, 70)
-    
-    # Dashboard de métricas en la parte superior
-    pdf.ln(5)
-    
-    # Métricas principales en tarjetas
-    y_pos = pdf.add_metric_card("Success Score", success_score, 
-                               "GOOD" if success_score >= 70 else "OKAY" if success_score >= 50 else "POOR", 
-                               15, 60)
-    
-    pdf.set_y(y_pos - 25)
-    pdf.add_metric_card("Engagement", engagement_score,
-                       "GOOD" if engagement_score >= 80 else "OKAY" if engagement_score >= 60 else "POOR",
-                       80, 60)
-    
-    pdf.set_y(y_pos - 25)
-    pdf.add_metric_card("Sentiment", sentiment_score,
-                       "GOOD" if sentiment_score >= 80 else "OKAY" if sentiment_score >= 60 else "POOR",
-                       145, 60)
-    
-    pdf.set_y(y_pos + 5)
-    
-    # Resumen ejecutivo
-    pdf.add_section_title("Summary")
-    pdf.add_summary_box(call.call_analysis.call_summary)
-    
-    # Información de la llamada en grid moderno
-    pdf.add_section_title("Call Information")
-    
-    call_info = [
-        ("Call ID", call.call_id[:15] + "..." if len(call.call_id) > 15 else call.call_id),
-        ("Status", call.call_status.upper()),
-        ("Duration", f"{call.duration_ms / 1000:.1f}s"),
-        ("Date", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%Y-%m-%d")),
-        ("Time", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%H:%M:%S")),
-        ("Type", call.call_type.replace("_", " ").title()),
-        ("Agent ID", call.agent_id[:12] + "..." if len(call.agent_id) > 12 else call.agent_id),
-        ("End Reason", call.disconnection_reason.replace("_", " ").title())
-    ]
-    
-    pdf.add_info_grid(call_info, 2)
-    
-    # Estadísticas de conversación
-    pdf.add_section_title("Conversation Stats")
-    
-    stats_info = [
-        ("Total Messages", conversation_summary['total_exchanges']),
-        ("User Messages", conversation_summary['user_messages']),
-        ("Agent Messages", conversation_summary['agent_messages']),
-        ("Inaudible Count", conversation_summary['inaudible_speeches']),
-        ("Success Rate", "Yes" if call.call_analysis.call_successful else "No"),
-        ("Voicemail", "Yes" if call.call_analysis.in_voicemail else "No")
-    ]
-    
-    pdf.add_info_grid(stats_info, 2)
-    
-    # Nueva página para la transcripción
-    pdf.add_page()
-    pdf.add_section_title("Full Transcript")
-    pdf.add_conversation_modern(concatenated_conversation)
-    
-    # Información de costos al final
-    pdf.ln(10)
-    pdf.add_section_title("Cost Analysis")
-    
-    cost_info = [
-        ("Total Cost", f"${call.call_cost.get('combined_cost', 0):.3f}"),
-        ("Billed Duration", f"{call.call_cost.get('total_duration_seconds', 0)}s"),
-        ("Rate per Unit", f"${call.call_cost.get('total_duration_unit_price', 0):.6f}"),
-        ("Currency", "USD")
-    ]
-    
-    pdf.add_info_grid(cost_info, 2)
-    
-    # Guardar el PDF
-    pdf.output(output_path)
+    try:
+        pdf = ModernPDFReport()
+        pdf.add_page()
+        
+        # Calcular métricas para el dashboard
+        success_score = 85 if call.call_analysis.call_successful else 45
+        engagement_score = max(20, 100 - (conversation_summary['inaudible_speeches'] * 30))
+        
+        # Mapear sentiment a score
+        sentiment_map = {
+            "Positive": 90,
+            "Neutral": 70,
+            "Negative": 40
+        }
+        sentiment_score = sentiment_map.get(call.call_analysis.user_sentiment, 70)
+        
+        logger.info(f"📊 Métricas calculadas | Success: {success_score} | Engagement: {engagement_score} | Sentiment: {sentiment_score}")
+        
+        # Dashboard de métricas en la parte superior
+        pdf.ln(5)
+        
+        # Métricas principales en tarjetas
+        y_pos = pdf.add_metric_card("Success Score", success_score, 
+                                   "GOOD" if success_score >= 70 else "OKAY" if success_score >= 50 else "POOR", 
+                                   15, 60)
+        
+        pdf.set_y(y_pos - 25)
+        pdf.add_metric_card("Engagement", engagement_score,
+                           "GOOD" if engagement_score >= 80 else "OKAY" if engagement_score >= 60 else "POOR",
+                           80, 60)
+        
+        pdf.set_y(y_pos - 25)
+        pdf.add_metric_card("Sentiment", sentiment_score,
+                           "GOOD" if sentiment_score >= 80 else "OKAY" if sentiment_score >= 60 else "POOR",
+                           145, 60)
+        
+        pdf.set_y(y_pos + 5)
+        logger.info("✅ Tarjetas de métricas agregadas al PDF")
+        
+        # Resumen ejecutivo
+        pdf.add_section_title("Summary")
+        pdf.add_summary_box(call.call_analysis.call_summary)
+        logger.info("✅ Sección de resumen agregada")
+        
+        # Información de la llamada en grid moderno
+        pdf.add_section_title("Call Information")
+        
+        call_info = [
+            ("Call ID", call.call_id[:15] + "..." if len(call.call_id) > 15 else call.call_id),
+            ("Status", call.call_status.upper()),
+            ("Duration", f"{call.duration_ms / 1000:.1f}s"),
+            ("Date", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%Y-%m-%d")),
+            ("Time", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%H:%M:%S")),
+            ("Type", call.call_type.replace("_", " ").title()),
+            ("Agent ID", call.agent_id[:12] + "..." if len(call.agent_id) > 12 else call.agent_id),
+            ("End Reason", call.disconnection_reason.replace("_", " ").title())
+        ]
+        
+        pdf.add_info_grid(call_info, 2)
+        logger.info("✅ Información de llamada agregada")
+        
+        # Estadísticas de conversación
+        pdf.add_section_title("Conversation Stats")
+        
+        stats_info = [
+            ("Total Messages", conversation_summary['total_exchanges']),
+            ("User Messages", conversation_summary['user_messages']),
+            ("Agent Messages", conversation_summary['agent_messages']),
+            ("Inaudible Count", conversation_summary['inaudible_speeches']),
+            ("Success Rate", "Yes" if call.call_analysis.call_successful else "No"),
+            ("Voicemail", "Yes" if call.call_analysis.in_voicemail else "No")
+        ]
+        
+        pdf.add_info_grid(stats_info, 2)
+        logger.info("✅ Estadísticas de conversación agregadas")
+        
+        # Nueva página para la transcripción
+        pdf.add_page()
+        pdf.add_section_title("Full Transcript")
+        pdf.add_conversation_modern(concatenated_conversation)
+        logger.info("✅ Transcripción completa agregada")
+        
+        # Información de costos al final
+        pdf.ln(10)
+        pdf.add_section_title("Cost Analysis")
+        
+        cost_info = [
+            ("Total Cost", f"${call.call_cost.get('combined_cost', 0):.3f}"),
+            ("Billed Duration", f"{call.call_cost.get('total_duration_seconds', 0)}s"),
+            ("Rate per Unit", f"${call.call_cost.get('total_duration_unit_price', 0):.6f}"),
+            ("Currency", "USD")
+        ]
+        
+        pdf.add_info_grid(cost_info, 2)
+        logger.info("✅ Análisis de costos agregado")
+        
+        # Guardar el PDF
+        pdf.output(output_path)
+        
+        # Verificar que el archivo se creó correctamente
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path)
+            logger.info(f"✅ PDF generado exitosamente | Tamaño: {file_size} bytes | Ruta: {output_path}")
+        else:
+            logger.error(f"❌ Error: PDF no se creó en la ruta especificada: {output_path}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error generando PDF | Call ID: {call.call_id} | Error: {str(e)}")
+        raise
 
 def get_conversation_summary(transcript_object: List[TranscriptItem]) -> Dict[str, Any]:
     """
     Genera un resumen de la conversación con estadísticas
     """
+    logger.info(f"📊 Generando resumen de conversación | Total elementos: {len(transcript_object)}")
+    
     user_messages = [item for item in transcript_object if item.role == "user"]
     agent_messages = [item for item in transcript_object if item.role == "agent"]
+    inaudible_count = len([item for item in user_messages if "(inaudible speech)" in item.content])
     
-    return {
+    summary = {
         "total_exchanges": len(transcript_object),
         "user_messages": len(user_messages),
         "agent_messages": len(agent_messages),
-        "inaudible_speeches": len([item for item in user_messages if "(inaudible speech)" in item.content])
+        "inaudible_speeches": inaudible_count
     }
+    
+    logger.info(f"📈 Resumen generado | Total: {summary['total_exchanges']} | Usuario: {summary['user_messages']} | Agente: {summary['agent_messages']} | Inaudibles: {summary['inaudible_speeches']}")
+    
+    return summary
 
 @app.get("/")
 async def root():
+    logger.info("🏠 Endpoint raíz accedido")
     return {"message": "Call Analysis API - Envía un POST a /process-call con el JSON de la llamada"}
 
 @app.post("/auto-email-report")
 async def auto_email_report(call_event: CallEvent):
     """
     Genera y envía automáticamente a la dirección configurada por defecto
-    SOLO procesa eventos 'call_ended' - otros eventos retornan 204
+    SOLO procesa eventos 'call_analyzed' - otros eventos retornan 200
     """
+    logger.info(f"📥 Auto-email-report recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id}")
+    
     try:
-        # FILTRO: Solo procesar call_ended
+        # FILTRO: Solo procesar call_analyzed
         if call_event.event != "call_analyzed":
-            return Response(status_code=204)  # No Content - evento ignorado
+            logger.info(f"⏭️ Evento '{call_event.event}' ignorado - solo se procesan eventos 'call_analyzed'")
+            return Response(status_code=200, content={"message": f"Event '{call_event.event}' received but not processed"})
             
         if not EMAIL_CONFIG.get("default_recipient"):
+            logger.error("❌ No hay destinatario por defecto configurado")
             raise HTTPException(status_code=400, detail="No default recipient configured. Please set default_recipient in EMAIL_CONFIG")
             
         call = call_event.call
+        logger.info(f"🔄 Procesando llamada | ID: {call.call_id} | Status: {call.call_status} | Duración: {call.duration_ms/1000:.1f}s")
                 
         # Concatenar la conversación
+        logger.info("🔄 Iniciando concatenación de conversación")
         concatenated_conversation = concatenate_conversation(call.transcript_object)
         conversation_summary = get_conversation_summary(call.transcript_object)
         
@@ -562,10 +653,14 @@ async def auto_email_report(call_event: CallEvent):
         pdf_filename = f"call_report_{call.call_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(temp_dir, pdf_filename)
         
+        logger.info(f"📁 Ruta temporal para PDF: {pdf_path}")
+        
         # Generar el PDF
+        logger.info("🔄 Iniciando generación de PDF")
         generate_pdf_report(call, concatenated_conversation, conversation_summary, pdf_path)
         
         # Enviar por email al destinatario por defecto
+        logger.info(f"📧 Enviando email a destinatario por defecto: {EMAIL_CONFIG['default_recipient']}")
         email_sent = send_email_with_pdf(
             pdf_path=pdf_path,
             recipient_email=EMAIL_CONFIG["default_recipient"],
@@ -577,9 +672,11 @@ async def auto_email_report(call_event: CallEvent):
         if email_sent:
             try:
                 os.remove(pdf_path)
-            except:
-                pass
+                logger.info(f"🗑️ Archivo temporal eliminado: {pdf_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ No se pudo eliminar archivo temporal: {str(e)}")
             
+            logger.info(f"✅ Proceso completado exitosamente | Call ID: {call.call_id}")
             return {
                 "success": True,
                 "message": f"Report generated and sent successfully to {EMAIL_CONFIG['default_recipient']}",
@@ -590,6 +687,7 @@ async def auto_email_report(call_event: CallEvent):
                 "event_processed": call_event.event
             }
         else:
+            logger.error(f"❌ Fallo en envío de email | Call ID: {call.call_id}")
             return {
                 "success": False,
                 "message": "Report generated but failed to send email",
@@ -598,24 +696,31 @@ async def auto_email_report(call_event: CallEvent):
             }
         
     except Exception as e:
+        logger.error(f"❌ Error en auto-email-report | Call ID: {call_event.call.call_id} | Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error in auto-email: {str(e)}")
 
 @app.post("/email-to-address")
-async def email_to_address(call_event: CallEvent, email: EmailStr):
+async def email_to_address(call_event: CallEvent, recipient_email: EmailStr):
     """
-    Genera PDF y envía a un email específico usando query parameter
-    SOLO procesa eventos 'call_ended' - otros eventos retornan 204
+    Genera PDF y envía a un email específico pasado como query parameter
+    SOLO procesa eventos 'call_analyzed' - otros eventos retornan 200
     """
+    logger.info(f"📧 Email-to-address recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id} | Destinatario: {recipient_email}")
+    
     try:
-        # FILTRO: Solo procesar call_ended
-        if call_event.event != "call_ended":
-            return Response(status_code=200)  # No Content - evento ignorado
+        # FILTRO: Solo procesar call_analyzed
+        if call_event.event != "call_analyzed":
+            logger.info(f"⏭️ Evento '{call_event.event}' ignorado - solo se procesan eventos 'call_analyzed'")
+            return Response(status_code=200, content={"message": f"Event '{call_event.event}' received but not processed"})
             
         call = call_event.call
         
         # Solo procesar llamadas que realmente terminaron
         if call.call_status != "ended":
-            return Response(status_code=204)  # No Content - llamada no terminada
+            logger.info(f"⏭️ Call status '{call.call_status}' - no se procesa (esperando 'ended')")
+            return Response(status_code=200, content={"message": f"Call status '{call.call_status}' - not processing"})
+        
+        logger.info(f"🔄 Procesando llamada para email específico | ID: {call.call_id} | Duración: {call.duration_ms/1000:.1f}s")
         
         # Concatenar la conversación
         concatenated_conversation = concatenate_conversation(call.transcript_object)
@@ -626,14 +731,17 @@ async def email_to_address(call_event: CallEvent, email: EmailStr):
         pdf_filename = f"call_report_{call.call_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(temp_dir, pdf_filename)
         
+        logger.info(f"📁 Generando PDF para envío específico: {pdf_path}")
+        
         # Generar el PDF
         generate_pdf_report(call, concatenated_conversation, conversation_summary, pdf_path)
         
         # Enviar por email
+        logger.info(f"📧 Enviando a email específico: {recipient_email}")
         email_sent = send_email_with_pdf(
             pdf_path=pdf_path,
-            recipient_email=email,
-            subject="Call Analysis Report - Luna Rossa",
+            recipient_email=recipient_email,
+            subject=f"Call Analysis Report - {call.call_id}",
             message="Please find attached the complete call analysis report with success metrics, engagement scores, and full conversation transcript.",
             call_id=call.call_id
         )
@@ -641,41 +749,123 @@ async def email_to_address(call_event: CallEvent, email: EmailStr):
         # Limpiar
         try:
             os.remove(pdf_path)
-        except:
-            pass
+            logger.info(f"🗑️ Archivo temporal eliminado: {pdf_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo eliminar archivo temporal: {str(e)}")
             
-        return {
+        result = {
             "success": email_sent,
-            "message": f"Email {'sent successfully' if email_sent else 'failed to send'} to {email}",
+            "message": f"Email {'sent successfully' if email_sent else 'failed to send'} to {recipient_email}",
             "call_id": call.call_id,
-            "recipient": email,
+            "recipient": recipient_email,
             "event_processed": call_event.event
         }
         
+        if email_sent:
+            logger.info(f"✅ Email enviado exitosamente a {recipient_email} | Call ID: {call.call_id}")
+        else:
+            logger.error(f"❌ Fallo en envío de email a {recipient_email} | Call ID: {call.call_id}")
+            
+        return result
+        
     except Exception as e:
+        logger.error(f"❌ Error en email-to-address | Call ID: {call_event.call.call_id} | Destinatario: {recipient_email} | Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error sending email: {str(e)}")
+
+@app.post("/send-to-custom-email")
+async def send_to_custom_email(call_event: CallEvent, email_config: EmailRequest):
+    """
+    Genera PDF y envía con configuración de email personalizada (sujeto y mensaje)
+    """
+    logger.info(f"📧 Send-to-custom-email recibido | Call ID: {call_event.call.call_id} | Destinatario: {email_config.email}")
+    
+    try:
+        call = call_event.call
+        
+        logger.info(f"🔄 Procesando llamada con configuración personalizada | ID: {call.call_id}")
+        
+        # Concatenar la conversación
+        concatenated_conversation = concatenate_conversation(call.transcript_object)
+        conversation_summary = get_conversation_summary(call.transcript_object)
+        
+        # Crear archivo temporal para el PDF
+        temp_dir = tempfile.gettempdir()
+        pdf_filename = f"call_report_{call.call_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        pdf_path = os.path.join(temp_dir, pdf_filename)
+        
+        logger.info(f"📁 Generando PDF con configuración personalizada: {pdf_path}")
+        
+        # Generar el PDF
+        generate_pdf_report(call, concatenated_conversation, conversation_summary, pdf_path)
+        
+        # Enviar por email con configuración personalizada
+        logger.info(f"📧 Enviando con configuración personalizada | Destinatario: {email_config.email} | Asunto: {email_config.subject}")
+        email_sent = send_email_with_pdf(
+            pdf_path=pdf_path,
+            recipient_email=email_config.email,
+            subject=email_config.subject,
+            message=email_config.message,
+            call_id=call.call_id
+        )
+        
+        # Limpiar archivo temporal
+        try:
+            os.remove(pdf_path)
+            logger.info(f"🗑️ Archivo temporal eliminado: {pdf_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo eliminar archivo temporal: {str(e)}")
+        
+        if email_sent:
+            logger.info(f"✅ Email con configuración personalizada enviado exitosamente | Call ID: {call.call_id}")
+            return {
+                "success": True,
+                "message": f"Report generated and sent successfully to {email_config.email}",
+                "call_id": call.call_id,
+                "recipient": email_config.email,
+                "subject": email_config.subject,
+                "email_sent": True
+            }
+        else:
+            logger.error(f"❌ Fallo en envío de email personalizado | Call ID: {call.call_id}")
+            return {
+                "success": False,
+                "message": "Report generated but failed to send email",
+                "call_id": call.call_id,
+                "email_sent": False,
+                "pdf_path": pdf_path
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en send-to-custom-email | Call ID: {call_event.call.call_id} | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating/sending custom email: {str(e)}")
 
 @app.post("/webhook")
 async def webhook_endpoint(call_event: CallEvent):
     """
     Endpoint para webhooks automáticos
-    SOLO procesa 'call_ended' - retorna 204 para otros eventos
+    SOLO procesa 'call_analyzed' - retorna 200 para otros eventos
     """
+    logger.info(f"🎣 Webhook recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id}")
+    
     try:
-        # FILTRO PRINCIPAL: Solo procesar call_ended
-        if call_event.event != "call_ended":
-            return Response(status_code=204)  # No Content - evento ignorado silenciosamente
+        # FILTRO PRINCIPAL: Solo procesar call_analyzed
+        if call_event.event != "call_analyzed":
+            logger.info(f"⏭️ Webhook ignorado - Evento '{call_event.event}' no es 'call_analyzed'")
+            return Response(status_code=200, content={"message": f"Event '{call_event.event}' received but not processed"})
             
         if not EMAIL_CONFIG.get("default_recipient"):
             # Si no hay destinatario configurado, registrar pero no fallar
-            print(f"⚠️ Warning: No default recipient configured for call {call_event.call.call_id}")
-            return Response(status_code=204)
+            logger.warning(f"⚠️ No hay destinatario por defecto configurado para call {call_event.call.call_id}")
+            return Response(status_code=200, content={"message": "No default recipient configured"})
             
         call = call_event.call
         
         # Verificar que la llamada realmente terminó
         if call.call_status != "ended":
-            return Response(status_code=204)  # No Content - llamada no terminada
+            logger.info(f"⏭️ Call status '{call.call_status}' - no se procesa (esperando 'ended')")
+            return Response(status_code=200, content={"message": f"Call status '{call.call_status}' - not processing"})
+        
+        logger.info(f"🔄 Procesando webhook | Call ID: {call.call_id} | Duración: {call.duration_ms/1000:.1f}s | Status: {call.call_status}")
         
         # Procesar automáticamente
         concatenated_conversation = concatenate_conversation(call.transcript_object)
@@ -686,10 +876,13 @@ async def webhook_endpoint(call_event: CallEvent):
         pdf_filename = f"call_report_{call.call_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(temp_dir, pdf_filename)
         
+        logger.info(f"📁 Generando PDF en: {pdf_path}")
+        
         # Generar el PDF
         generate_pdf_report(call, concatenated_conversation, conversation_summary, pdf_path)
         
         # Enviar por email
+        logger.info(f"📧 Enviando email automático a: {EMAIL_CONFIG['default_recipient']}")
         email_sent = send_email_with_pdf(
             pdf_path=pdf_path,
             recipient_email=EMAIL_CONFIG["default_recipient"],
@@ -701,19 +894,20 @@ async def webhook_endpoint(call_event: CallEvent):
         # Limpiar archivo temporal
         try:
             os.remove(pdf_path)
-        except:
-            pass
+            logger.info(f"🗑️ Archivo temporal eliminado: {pdf_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo eliminar archivo temporal: {str(e)}")
         
         # Log del resultado (para debugging)
-        print(f"📧 Webhook processed: Call {call.call_id} | Email sent: {email_sent} | Recipient: {EMAIL_CONFIG['default_recipient']}")
+        logger.info(f"✅ Webhook procesado exitosamente | Call: {call.call_id} | Email enviado: {email_sent} | Destinatario: {EMAIL_CONFIG['default_recipient']}")
         
         # Retornar 200 OK para confirmar procesamiento
         return {"success": True, "call_id": call.call_id, "email_sent": email_sent}
         
     except Exception as e:
         # Log del error pero no fallar el webhook
-        print(f"❌ Webhook error for call {call_event.call.call_id}: {str(e)}")
-        return Response(status_code=204)  # No Content incluso en error
+        logger.error(f"❌ Error en webhook | Call ID: {call_event.call.call_id} | Error: {str(e)}")
+        return Response(status_code=200, content={"error": str(e), "success": False})
 
 @app.post("/update-default-recipient")
 async def update_default_recipient(email: EmailStr):
@@ -731,13 +925,26 @@ async def update_default_recipient(email: EmailStr):
         raise HTTPException(status_code=500, detail=f"Error updating recipient: {str(e)}")
 
 @app.post("/generate-and-email-report")
-async def generate_and_email_report(request: CallEventWithEmail):
+async def generate_and_email_report(call_event: CallEvent):
     """
-    Genera un PDF completo y lo envía por email
+    Genera un PDF completo y lo envía por email al destinatario por defecto
+    Recibe directamente el JSON del evento call_analyzed
     """
+    logger.info(f"📧 Generate-and-email-report recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id}")
+    
     try:
-        call = request.call
-        email_config = request.email_config
+
+        
+        # Verificar que hay destinatario configurado
+        if not EMAIL_CONFIG.get("default_recipient"):
+            logger.error("❌ No hay destinatario por defecto configurado")
+            raise HTTPException(status_code=400, detail="No default recipient configured. Please set default_recipient in EMAIL_CONFIG")
+        
+        call = call_event.call
+        
+
+        
+        logger.info(f"🔄 Procesando llamada para reporte | ID: {call.call_id} | Status: {call.call_status} | Duración: {call.duration_ms/1000:.1f}s")
         
         # Concatenar la conversación
         concatenated_conversation = concatenate_conversation(call.transcript_object)
@@ -750,15 +957,18 @@ async def generate_and_email_report(request: CallEventWithEmail):
         pdf_filename = f"call_report_{call.call_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(temp_dir, pdf_filename)
         
+        logger.info(f"📁 Generando PDF en ruta temporal: {pdf_path}")
+        
         # Generar el PDF
         generate_pdf_report(call, concatenated_conversation, conversation_summary, pdf_path)
         
-        # Enviar por email
+        # Enviar por email al destinatario por defecto
+        logger.info(f"📧 Enviando reporte a destinatario por defecto: {EMAIL_CONFIG['default_recipient']}")
         email_sent = send_email_with_pdf(
             pdf_path=pdf_path,
-            recipient_email=email_config.email,
-            subject=email_config.subject,
-            message=email_config.message,
+            recipient_email=EMAIL_CONFIG["default_recipient"],
+            subject=f"Call Analysis Report - {call.call_id}",
+            message="Please find attached the complete call analysis report with success metrics, engagement scores, and full conversation transcript.",
             call_id=call.call_id
         )
         
@@ -766,16 +976,27 @@ async def generate_and_email_report(request: CallEventWithEmail):
             # Limpiar archivo temporal
             try:
                 os.remove(pdf_path)
-            except:
-                pass
+                logger.info(f"🗑️ Archivo temporal eliminado: {pdf_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ No se pudo eliminar archivo temporal: {str(e)}")
             
+            logger.info(f"✅ Reporte generado y enviado exitosamente | Call ID: {call.call_id}")
             return {
                 "success": True,
-                "message": f"Report generated and sent successfully to {email_config.email}",
+                "message": f"Report generated and sent successfully to {EMAIL_CONFIG['default_recipient']}",
                 "call_id": call.call_id,
-                "email_sent": True
+                "recipient": EMAIL_CONFIG["default_recipient"],
+                "email_sent": True,
+                "event_processed": call_event.event,
+                "call_details": {
+                    "duration_seconds": call.duration_ms / 1000,
+                    "status": call.call_status,
+                    "sentiment": call.call_analysis.user_sentiment,
+                    "successful": call.call_analysis.call_successful
+                }
             }
         else:
+            logger.error(f"❌ Fallo en envío de email para reporte | Call ID: {call.call_id}")
             return {
                 "success": False,
                 "message": "Report generated but failed to send email",
@@ -785,6 +1006,7 @@ async def generate_and_email_report(request: CallEventWithEmail):
             }
         
     except Exception as e:
+        logger.error(f"❌ Error en generate-and-email-report | Call ID: {call_event.call.call_id} | Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating/sending report: {str(e)}")
 
 @app.post("/send-existing-pdf")
@@ -839,6 +1061,7 @@ async def get_email_config():
         "smtp_server": EMAIL_CONFIG["smtp_server"],
         "smtp_port": EMAIL_CONFIG["smtp_port"],
         "sender_email": EMAIL_CONFIG["email_user"],
+        "default_recipient": EMAIL_CONFIG.get("default_recipient", "Not set"),
         "status": "configured" if EMAIL_CONFIG["email_user"] != "tu_email@gmail.com" else "not_configured"
     }
 
@@ -929,23 +1152,164 @@ async def process_call(call_event: CallEvent):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando la llamada: {str(e)}")
 
+@app.get("/email-config")
+async def get_email_config():
+    """
+    Obtiene la configuración de email actual (sin mostrar credenciales)
+    """
+    logger.info("📧 Consulta de configuración de email")
+    
+    config = {
+        "smtp_server": EMAIL_CONFIG["smtp_server"],
+        "smtp_port": EMAIL_CONFIG["smtp_port"],
+        "sender_email": EMAIL_CONFIG["email_user"],
+        "default_recipient": EMAIL_CONFIG.get("default_recipient", "Not set"),
+        "status": "configured" if EMAIL_CONFIG["email_user"] != "tu_email@gmail.com" else "not_configured"
+    }
+    
+    logger.info(f"📧 Configuración consultada | SMTP: {config['smtp_server']} | Sender: {config['sender_email']} | Recipient: {config['default_recipient']}")
+    
+    return config
+
+@app.post("/update-email-config")
+async def update_email_config(smtp_server: str, smtp_port: int, email_user: str, email_password: str):
+    """
+    Actualiza la configuración de email SMTP
+    """
+    logger.info(f"🔧 Actualizando configuración SMTP | Servidor: {smtp_server} | Usuario: {email_user}")
+    
+    try:
+        old_config = f"{EMAIL_CONFIG['smtp_server']}:{EMAIL_CONFIG['smtp_port']}"
+        
+        EMAIL_CONFIG["smtp_server"] = smtp_server
+        EMAIL_CONFIG["smtp_port"] = smtp_port
+        EMAIL_CONFIG["email_user"] = email_user
+        EMAIL_CONFIG["email_password"] = email_password
+        
+        logger.info(f"✅ Configuración SMTP actualizada | Anterior: {old_config} | Nuevo: {smtp_server}:{smtp_port}")
+        
+        return {
+            "success": True,
+            "message": "Email configuration updated successfully",
+            "smtp_server": smtp_server,
+            "smtp_port": smtp_port,
+            "email_user": email_user
+        }
+    except Exception as e:
+        logger.error(f"❌ Error actualizando configuración SMTP | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating config: {str(e)}")
+
 @app.post("/concatenate-only")
 async def concatenate_only(call_event: CallEvent):
     """
     Endpoint simplificado que solo devuelve la conversación concatenada
     """
+    logger.info(f"🔗 Concatenate-only recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id}")
+    
     try:
         concatenated = concatenate_conversation(call_event.call.transcript_object)
-        return {
+        
+        result = {
             "call_id": call_event.call.call_id,
             "concatenated_conversation": concatenated
         }
+        
+        logger.info(f"✅ Conversación concatenada exitosamente | Call ID: {call_event.call.call_id} | Caracteres: {len(concatenated)}")
+        
+        return result
     except Exception as e:
+        logger.error(f"❌ Error concatenando conversación | Call ID: {call_event.call.call_id} | Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error concatenando conversación: {str(e)}")
+
+# Endpoint de documentación de uso
+@app.get("/api-guide")
+async def api_guide():
+    """
+    Guía de uso de los endpoints disponibles
+    """
+    logger.info("📖 Consulta de guía de API")
+    
+    return {
+        "title": "Call Analysis API - Guía de Uso",
+        "version": "1.0.0",
+        "endpoints": {
+            "webhook": {
+                "path": "/webhook",
+                "method": "POST",
+                "description": "Endpoint para webhooks automáticos - procesa 'call_analyzed' y envía a email por defecto",
+                "input": "CallEvent JSON (evento call_analyzed)"
+            },
+            "auto_email": {
+                "path": "/auto-email-report", 
+                "method": "POST",
+                "description": "Genera PDF y envía automáticamente al email por defecto configurado",
+                "input": "CallEvent JSON (evento call_analyzed)"
+            },
+            "custom_email": {
+                "path": "/generate-and-email-report",
+                "method": "POST", 
+                "description": "Genera PDF y envía al email por defecto - acepta directamente el JSON de call_analyzed",
+                "input": "CallEvent JSON (tu JSON exacto)"
+            },
+            "specific_email": {
+                "path": "/email-to-address",
+                "method": "POST",
+                "description": "Genera PDF y envía a email específico (query parameter)",
+                "input": "CallEvent JSON + recipient_email parameter"
+            },
+            "custom_message": {
+                "path": "/send-to-custom-email",
+                "method": "POST",
+                "description": "Envía con asunto y mensaje personalizado",
+                "input": "CallEvent JSON + EmailRequest (email, subject, message)"
+            },
+            "pdf_only": {
+                "path": "/generate-pdf-report",
+                "method": "POST",
+                "description": "Solo genera PDF para descarga (no envía email)",
+                "input": "CallEvent JSON"
+            },
+            "process_only": {
+                "path": "/process-call",
+                "method": "POST",
+                "description": "Procesa llamada y devuelve análisis (no genera PDF ni email)",
+                "input": "CallEvent JSON"
+            },
+            "concatenate_only": {
+                "path": "/concatenate-only",
+                "method": "POST",
+                "description": "Solo concatena conversación en formato legible",
+                "input": "CallEvent JSON"
+            }
+        },
+        "management": {
+            "email_config": {
+                "get": "/email-config - Ver configuración actual",
+                "update_recipient": "/update-default-recipient - Cambiar email por defecto",
+                "update_smtp": "/update-email-config - Cambiar configuración SMTP"
+            },
+            "monitoring": {
+                "health": "/health - Health check",
+                "logs": "/logs?lines=50 - Ver logs recientes", 
+                "stats": "/stats - Estadísticas del sistema"
+            }
+        },
+        "recommended_usage": {
+            "webhook_automation": "Usar /webhook para procesamiento automático",
+            "manual_reports": "Usar /generate-and-email-report para tu JSON directo",
+            "testing": "Usar /process-call para testing sin envío de email"
+        }
+    }
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
+    logger.info("🚀 Iniciando servidor Call Analysis API...")
+    logger.info(f"📧 Email configurado: {EMAIL_CONFIG['email_user']}")
+    logger.info(f"📧 Destinatario por defecto: {EMAIL_CONFIG.get('default_recipient', 'No configurado')}")
+    logger.info("🌐 Servidor disponible en: http://0.0.0.0:8000")
+    logger.info("📚 Documentación API en: http://0.0.0.0:8000/docs")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
