@@ -148,7 +148,7 @@ EMAIL_CONFIG = {
     "smtp_port": 587,
     "email_user": "aensilesqla@gmail.com", 
     "email_password": "qpjntndxixwxdahn",
-    "default_recipient": "cristian.mancilla96@gmail.com",  # Email por defecto
+    "default_recipient": "aensilesqla@gmail.com",  # Email por defecto
 }
 
 def clean_text_for_pdf(text):
