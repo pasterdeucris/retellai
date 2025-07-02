@@ -17,6 +17,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 import time
 from fastapi import Request
+import unicodedata
+import re
 
 # Configuración de logging
 def setup_logging():
@@ -148,6 +150,84 @@ EMAIL_CONFIG = {
     "email_password": "qpjntndxixwxdahn",
     "default_recipient": "cristian.mancilla96@gmail.com",  # Email por defecto
 }
+
+def clean_text_for_pdf(text):
+    """
+    Limpia el texto para que sea compatible con FPDF
+    Reemplaza caracteres Unicode problemáticos con equivalentes ASCII
+    """
+    if not text:
+        return ""
+    
+    # Convertir a string si no lo es
+    text = str(text)
+    
+    # Mapeo de caracteres problemáticos comunes
+    char_replacements = {
+        ''': "'",  # Smart quote left
+        ''': "'",  # Smart quote right
+        '"': '"',  # Smart quote left double
+        '"': '"',  # Smart quote right double
+        '–': '-',  # En dash
+        '—': '-',  # Em dash
+        '…': '...',  # Ellipsis
+        '°': ' degrees',  # Degree symbol
+        '©': '(c)',  # Copyright
+        '®': '(R)',  # Registered trademark
+        '™': '(TM)',  # Trademark
+        '€': 'EUR',  # Euro symbol
+        '£': 'GBP',  # Pound symbol
+        '¥': 'JPY',  # Yen symbol
+        '§': 'Section',  # Section symbol
+        '¶': 'Paragraph',  # Paragraph symbol
+        '†': '+',  # Dagger
+        '‡': '++',  # Double dagger
+        '•': '*',  # Bullet
+        '‰': ' per mille',  # Per mille
+        '‹': '<',  # Single left angle quotation
+        '›': '>',  # Single right angle quotation
+        '«': '<<',  # Left double angle quotation
+        '»': '>>',  # Right double angle quotation
+    }
+    
+    # Aplicar reemplazos específicos
+    for unicode_char, ascii_replacement in char_replacements.items():
+        text = text.replace(unicode_char, ascii_replacement)
+    
+    # Normalizar Unicode y remover acentos si es necesario
+    # NFD = Normalization Form Decomposed
+    text = unicodedata.normalize('NFD', text)
+    
+    # Filtrar solo caracteres ASCII imprimibles y algunos especiales
+    allowed_chars = []
+    for char in text:
+        # Permitir caracteres ASCII imprimibles (32-126)
+        if 32 <= ord(char) <= 126:
+            allowed_chars.append(char)
+        # Permitir algunos caracteres especiales comunes
+        elif char in ['\n', '\r', '\t']:
+            allowed_chars.append(char)
+        # Reemplazar otros caracteres con espacio
+        else:
+            # Solo agregar espacio si el último carácter no es espacio
+            if allowed_chars and allowed_chars[-1] != ' ':
+                allowed_chars.append(' ')
+    
+    cleaned_text = ''.join(allowed_chars)
+    
+    # Limpiar espacios múltiples
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    
+    return cleaned_text
+
+def safe_text_length(text, max_length=80):
+    """
+    Trunca texto de manera segura para evitar problemas de ancho
+    """
+    cleaned = clean_text_for_pdf(text)
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[:max_length-3] + "..."
 
 def send_email_with_pdf(pdf_path: str, recipient_email: str, subject: str, message: str, call_id: str):
     """
@@ -308,9 +388,28 @@ class ModernPDFReport(FPDF):
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.cell(0, 10, f'Generated on {current_time} | Page {self.page_no()}', 0, 0, 'C')
     
+    def safe_cell(self, w, h, txt='', border=0, ln=0, align='', fill=False):
+        """
+        Versión segura de cell que limpia el texto antes de usarlo
+        """
+        cleaned_txt = clean_text_for_pdf(txt)
+        self.cell(w, h, cleaned_txt, border, ln, align, fill)
+    
+    def safe_multi_cell(self, w, h, txt, border=0, align='J', fill=False):
+        """
+        Versión segura de multi_cell que limpia el texto
+        """
+        cleaned_txt = clean_text_for_pdf(txt)
+        self.multi_cell(w, h, cleaned_txt, border, align, fill)
+    
     def add_metric_card(self, title, value, status, x_pos, width=60):
         """Crea una tarjeta de métrica moderna"""
         y_start = self.get_y()
+        
+        # Limpiar textos
+        title = clean_text_for_pdf(title)
+        value = clean_text_for_pdf(str(value))
+        status = clean_text_for_pdf(status)
         
         # Determinar color según status
         if status == "GOOD":
@@ -336,7 +435,7 @@ class ModernPDFReport(FPDF):
         # Valor grande
         self.set_xy(x_pos + 5, y_start + 10)
         self.set_font('Arial', 'B', 16)
-        self.cell(width-30, 8, str(value), 0, 0, 'L')
+        self.cell(width-30, 8, value, 0, 0, 'L')
         
         # Status
         self.set_xy(x_pos + width - 25, y_start + 12)
@@ -349,8 +448,13 @@ class ModernPDFReport(FPDF):
         self.ln(8)
         self.set_font('Arial', 'B', 14)
         self.set_text_color(51, 51, 51)
+        
+        # Limpiar título e icono
+        title = clean_text_for_pdf(title)
+        icon = clean_text_for_pdf(icon)
+        
         full_title = f"{icon} {title}" if icon else title
-        self.cell(0, 10, full_title, 0, 1, 'L')
+        self.safe_cell(0, 10, full_title, 0, 1, 'L')
         
         # Línea decorativa debajo del título
         self.set_fill_color(229, 231, 235)
@@ -372,31 +476,36 @@ class ModernPDFReport(FPDF):
             self.set_fill_color(248, 250, 252)
             self.rect(x_pos, y_pos, 85, 10, 'F')
             
+            # Limpiar key y value
+            clean_key = safe_text_length(str(key), 25)
+            clean_value = safe_text_length(str(value), 25)
+            
             # Clave en gris
             self.set_xy(x_pos + 2, y_pos + 1)
             self.set_font('Arial', '', 8)
             self.set_text_color(107, 114, 128)
-            self.cell(83, 4, key, 0, 0, 'L')
+            self.safe_cell(83, 4, clean_key, 0, 0, 'L')
             
             # Valor en negro
             self.set_xy(x_pos + 2, y_pos + 5)
             self.set_font('Arial', 'B', 9)
             self.set_text_color(31, 41, 55)
-            
-            # Truncar valor si es muy largo
-            display_value = str(value)
-            if len(display_value) > 25:
-                display_value = display_value[:22] + "..."
-            
-            self.cell(83, 4, display_value, 0, 0, 'L')
+            self.safe_cell(83, 4, clean_value, 0, 0, 'L')
         
         self.ln(15)
     
     def add_summary_box(self, text):
-        """Crea una caja de resumen moderna"""
+        """Caja de resumen con texto limpio"""
+        # Limpiar el texto del resumen
+        clean_summary = clean_text_for_pdf(text)
+        
+        # Calcular altura basada en el texto limpio
+        words_per_line = 70
+        estimated_lines = max(3, len(clean_summary) // words_per_line + 1)
+        box_height = max(30, estimated_lines * 5 + 15)
+        
         # Fondo de la caja
         self.set_fill_color(249, 250, 251)
-        box_height = max(30, len(text) // 80 * 6 + 20)
         self.rect(15, self.get_y(), 180, box_height, 'F')
         
         # Borde izquierdo decorativo
@@ -408,83 +517,91 @@ class ModernPDFReport(FPDF):
         self.set_font('Arial', '', 10)
         self.set_text_color(55, 65, 81)
         
-        # Dividir texto en líneas
-        words = text.split()
-        lines = []
-        current_line = ""
-        
-        for word in words:
-            if len(current_line + word) < 70:
-                current_line += word + " "
-            else:
-                lines.append(current_line.strip())
-                current_line = word + " "
-        if current_line:
-            lines.append(current_line.strip())
-        
-        for line in lines:
-            self.cell(170, 5, line, 0, 1, 'L')
-            self.set_x(25)
+        # Usar multi_cell para texto largo
+        try:
+            self.safe_multi_cell(170, 5, clean_summary, 0, 'L')
+        except Exception as e:
+            logger.warning(f"Error en summary box, usando texto truncado: {str(e)}")
+            # Fallback: usar versión truncada
+            truncated = safe_text_length(clean_summary, 300)
+            self.safe_multi_cell(170, 5, truncated, 0, 'L')
         
         self.ln(10)
     
     def add_conversation_modern(self, conversation):
-        """Formato moderno para la conversación"""
-        lines = conversation.split('\n')
+        """Formato moderno para la conversación con texto limpio"""
+        clean_conversation = clean_text_for_pdf(conversation)
+        lines = clean_conversation.split('\n')
         
         for line in lines:
             if not line.strip():
                 continue
-                
-            if line.startswith('User:'):
-                # Mensaje del usuario - estilo chat moderno
-                self.ln(3)
-                message = line[5:].strip()
-                
-                # Fondo azul claro para usuario
-                self.set_fill_color(219, 234, 254)
-                msg_height = max(8, len(message) // 60 * 4 + 8)
-                self.rect(20, self.get_y(), 160, msg_height, 'F')
-                
-                # Etiqueta "User"
-                self.set_xy(25, self.get_y() + 1)
-                self.set_font('Arial', 'B', 8)
-                self.set_text_color(30, 64, 175)
-                self.cell(0, 3, 'USER', 0, 1, 'L')
-                
-                # Mensaje
-                self.set_x(25)
-                self.set_font('Arial', '', 9)
-                self.set_text_color(51, 51, 51)
-                self.cell(150, 4, message, 0, 1, 'L')
-                
-            elif line.startswith('Agent:'):
-                # Mensaje del agente
-                self.ln(3)
-                message = line[6:].strip()
-                
-                # Fondo verde claro para agente
-                self.set_fill_color(220, 252, 231)
-                msg_height = max(8, len(message) // 60 * 4 + 8)
-                self.rect(20, self.get_y(), 160, msg_height, 'F')
-                
-                # Etiqueta "Agent"
-                self.set_xy(25, self.get_y() + 1)
-                self.set_font('Arial', 'B', 8)
-                self.set_text_color(22, 101, 52)
-                self.cell(0, 3, 'AGENT', 0, 1, 'L')
-                
-                # Mensaje
-                self.set_x(25)
-                self.set_font('Arial', '', 9)
-                self.set_text_color(51, 51, 51)
-                self.cell(150, 4, message, 0, 1, 'L')
+            
+            try:
+                if line.startswith('User:'):
+                    self._add_message_bubble(line[5:].strip(), 'USER', (219, 234, 254), (30, 64, 175))
+                elif line.startswith('Agent:'):
+                    self._add_message_bubble(line[6:].strip(), 'AGENT', (220, 252, 231), (22, 101, 52))
+                elif line.startswith('Assistant:'):
+                    self._add_message_bubble(line[10:].strip(), 'AGENT', (220, 252, 231), (22, 101, 52))
+                else:
+                    # Línea sin formato específico
+                    self._add_message_bubble(line.strip(), 'SYSTEM', (243, 244, 246), (75, 85, 99))
+            except Exception as e:
+                logger.warning(f"Error procesando línea de conversación: {str(e)}")
+                continue
+    
+    def _add_message_bubble(self, message, sender, bg_color, text_color):
+        """Añade una burbuja de mensaje individual"""
+        if not message.strip():
+            return
+            
+        # Limpiar mensaje
+        clean_message = safe_text_length(message, 200)
+        
+        self.ln(3)
+        
+        # Calcular altura necesaria
+        words_per_line = 60
+        estimated_lines = max(1, len(clean_message) // words_per_line + 1)
+        msg_height = max(8, estimated_lines * 4 + 8)
+        
+        # Verificar que no se sale de la página
+        if self.get_y() + msg_height > 280:  # Cerca del final de la página
+            self.add_page()
+        
+        # Fondo del mensaje
+        self.set_fill_color(*bg_color)
+        self.rect(20, self.get_y(), 160, msg_height, 'F')
+        
+        # Etiqueta del remitente
+        self.set_xy(25, self.get_y() + 1)
+        self.set_font('Arial', 'B', 8)
+        self.set_text_color(*text_color)
+        self.safe_cell(0, 3, sender, 0, 1, 'L')
+        
+        # Mensaje
+        self.set_x(25)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(51, 51, 51)
+        
+        try:
+            # Usar multi_cell para mensajes largos
+            if len(clean_message) > 80:
+                self.safe_multi_cell(150, 4, clean_message, 0, 'L')
+            else:
+                self.safe_cell(150, 4, clean_message, 0, 1, 'L')
+        except Exception as e:
+            logger.warning(f"Error añadiendo mensaje, usando versión simple: {str(e)}")
+            # Fallback simple
+            simple_message = safe_text_length(clean_message, 80)
+            self.safe_cell(150, 4, simple_message, 0, 1, 'L')
 
 def generate_pdf_report(call: Call, concatenated_conversation: str, conversation_summary: Dict[str, Any], output_path: str):
     """
-    Genera un PDF moderno con métricas visuales
+    Genera un PDF moderno con manejo robusto de Unicode
     """
-    logger.info(f"📄 Iniciando generación de PDF | Call ID: {call.call_id} | Output: {output_path}")
+    logger.info(f"📄 Iniciando generación de PDF con soporte Unicode | Call ID: {call.call_id}")
     
     try:
         pdf = ModernPDFReport()
@@ -497,7 +614,7 @@ def generate_pdf_report(call: Call, concatenated_conversation: str, conversation
         # Mapear sentiment a score
         sentiment_map = {
             "Positive": 90,
-            "Neutral": 70,
+            "Neutral": 70, 
             "Negative": 40
         }
         sentiment_score = sentiment_map.get(call.call_analysis.user_sentiment, 70)
@@ -525,7 +642,7 @@ def generate_pdf_report(call: Call, concatenated_conversation: str, conversation
         pdf.set_y(y_pos + 5)
         logger.info("✅ Tarjetas de métricas agregadas al PDF")
         
-        # Resumen ejecutivo
+        # Resumen ejecutivo con texto limpio
         pdf.add_section_title("Summary")
         pdf.add_summary_box(call.call_analysis.call_summary)
         logger.info("✅ Sección de resumen agregada")
@@ -534,13 +651,13 @@ def generate_pdf_report(call: Call, concatenated_conversation: str, conversation
         pdf.add_section_title("Call Information")
         
         call_info = [
-            ("Call ID", call.call_id[:15] + "..." if len(call.call_id) > 15 else call.call_id),
+            ("Call ID", safe_text_length(call.call_id, 15)),
             ("Status", call.call_status.upper()),
             ("Duration", f"{call.duration_ms / 1000:.1f}s"),
             ("Date", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%Y-%m-%d")),
             ("Time", datetime.fromtimestamp(call.start_timestamp / 1000).strftime("%H:%M:%S")),
             ("Type", call.call_type.replace("_", " ").title()),
-            ("Agent ID", call.agent_id[:12] + "..." if len(call.agent_id) > 12 else call.agent_id),
+            ("Agent ID", safe_text_length(call.agent_id, 12)),
             ("End Reason", call.disconnection_reason.replace("_", " ").title())
         ]
         
@@ -588,7 +705,7 @@ def generate_pdf_report(call: Call, concatenated_conversation: str, conversation
         # Verificar que el archivo se creó correctamente
         if os.path.exists(output_path):
             file_size = os.path.getsize(output_path)
-            logger.info(f"✅ PDF generado exitosamente | Tamaño: {file_size} bytes | Ruta: {output_path}")
+            logger.info(f"✅ PDF generado exitosamente con soporte Unicode | Tamaño: {file_size} bytes")
         else:
             logger.error(f"❌ Error: PDF no se creó en la ruta especificada: {output_path}")
             
@@ -933,16 +1050,12 @@ async def generate_and_email_report(call_event: CallEvent):
     logger.info(f"📧 Generate-and-email-report recibido | Evento: {call_event.event} | Call ID: {call_event.call.call_id}")
     
     try:
-
-        
         # Verificar que hay destinatario configurado
         if not EMAIL_CONFIG.get("default_recipient"):
             logger.error("❌ No hay destinatario por defecto configurado")
             raise HTTPException(status_code=400, detail="No default recipient configured. Please set default_recipient in EMAIL_CONFIG")
         
         call = call_event.call
-        
-
         
         logger.info(f"🔄 Procesando llamada para reporte | ID: {call.call_id} | Status: {call.call_status} | Duración: {call.duration_ms/1000:.1f}s")
         
@@ -1057,32 +1170,46 @@ async def get_email_config():
     """
     Obtiene la configuración de email actual (sin mostrar credenciales)
     """
-    return {
+    logger.info("📧 Consulta de configuración de email")
+    
+    config = {
         "smtp_server": EMAIL_CONFIG["smtp_server"],
         "smtp_port": EMAIL_CONFIG["smtp_port"],
         "sender_email": EMAIL_CONFIG["email_user"],
         "default_recipient": EMAIL_CONFIG.get("default_recipient", "Not set"),
         "status": "configured" if EMAIL_CONFIG["email_user"] != "tu_email@gmail.com" else "not_configured"
     }
+    
+    logger.info(f"📧 Configuración consultada | SMTP: {config['smtp_server']} | Sender: {config['sender_email']} | Recipient: {config['default_recipient']}")
+    
+    return config
 
 @app.post("/update-email-config")
 async def update_email_config(smtp_server: str, smtp_port: int, email_user: str, email_password: str):
     """
-    Actualiza la configuración de email
+    Actualiza la configuración de email SMTP
     """
+    logger.info(f"🔧 Actualizando configuración SMTP | Servidor: {smtp_server} | Usuario: {email_user}")
+    
     try:
+        old_config = f"{EMAIL_CONFIG['smtp_server']}:{EMAIL_CONFIG['smtp_port']}"
+        
         EMAIL_CONFIG["smtp_server"] = smtp_server
         EMAIL_CONFIG["smtp_port"] = smtp_port
         EMAIL_CONFIG["email_user"] = email_user
         EMAIL_CONFIG["email_password"] = email_password
         
+        logger.info(f"✅ Configuración SMTP actualizada | Anterior: {old_config} | Nuevo: {smtp_server}:{smtp_port}")
+        
         return {
             "success": True,
             "message": "Email configuration updated successfully",
             "smtp_server": smtp_server,
+            "smtp_port": smtp_port,
             "email_user": email_user
         }
     except Exception as e:
+        logger.error(f"❌ Error actualizando configuración SMTP | Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating config: {str(e)}")
 
 @app.post("/generate-pdf-report")
@@ -1151,53 +1278,6 @@ async def process_call(call_event: CallEvent):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando la llamada: {str(e)}")
-
-@app.get("/email-config")
-async def get_email_config():
-    """
-    Obtiene la configuración de email actual (sin mostrar credenciales)
-    """
-    logger.info("📧 Consulta de configuración de email")
-    
-    config = {
-        "smtp_server": EMAIL_CONFIG["smtp_server"],
-        "smtp_port": EMAIL_CONFIG["smtp_port"],
-        "sender_email": EMAIL_CONFIG["email_user"],
-        "default_recipient": EMAIL_CONFIG.get("default_recipient", "Not set"),
-        "status": "configured" if EMAIL_CONFIG["email_user"] != "tu_email@gmail.com" else "not_configured"
-    }
-    
-    logger.info(f"📧 Configuración consultada | SMTP: {config['smtp_server']} | Sender: {config['sender_email']} | Recipient: {config['default_recipient']}")
-    
-    return config
-
-@app.post("/update-email-config")
-async def update_email_config(smtp_server: str, smtp_port: int, email_user: str, email_password: str):
-    """
-    Actualiza la configuración de email SMTP
-    """
-    logger.info(f"🔧 Actualizando configuración SMTP | Servidor: {smtp_server} | Usuario: {email_user}")
-    
-    try:
-        old_config = f"{EMAIL_CONFIG['smtp_server']}:{EMAIL_CONFIG['smtp_port']}"
-        
-        EMAIL_CONFIG["smtp_server"] = smtp_server
-        EMAIL_CONFIG["smtp_port"] = smtp_port
-        EMAIL_CONFIG["email_user"] = email_user
-        EMAIL_CONFIG["email_password"] = email_password
-        
-        logger.info(f"✅ Configuración SMTP actualizada | Anterior: {old_config} | Nuevo: {smtp_server}:{smtp_port}")
-        
-        return {
-            "success": True,
-            "message": "Email configuration updated successfully",
-            "smtp_server": smtp_server,
-            "smtp_port": smtp_port,
-            "email_user": email_user
-        }
-    except Exception as e:
-        logger.error(f"❌ Error actualizando configuración SMTP | Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating config: {str(e)}")
 
 @app.post("/concatenate-only")
 async def concatenate_only(call_event: CallEvent):
@@ -1312,4 +1392,4 @@ if __name__ == "__main__":
     logger.info("🌐 Servidor disponible en: http://0.0.0.0:8000")
     logger.info("📚 Documentación API en: http://0.0.0.0:8000/docs")
     
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
